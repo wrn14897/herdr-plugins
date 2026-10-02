@@ -1,0 +1,58 @@
+name: herdr-picker release
+
+on:
+  push:
+    tags: ["herdr-picker-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: herdr-picker
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches manifest version
+        run: |
+          version="$(grep -m1 '^version' herdr-plugin.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          test "herdr-picker-v${version}" = "${GITHUB_REF_NAME}"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux)
+        if: runner.os == 'Linux'
+        run: cargo install cross --locked
+
+      - name: Build
+        run: |
+          if [ "${{ runner.os }}" = Linux ]; then
+            cross build --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+
+      - name: Package
+        run: |
+          archive="herdr-picker-${{ matrix.target }}.tar.gz"
+          tar -czf "$archive" -C "target/${{ matrix.target }}/release" herdr-picker
+          shasum -a 256 "$archive" > "$archive.sha256"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            herdr-picker/herdr-picker-${{ matrix.target }}.tar.gz
+            herdr-picker/herdr-picker-${{ matrix.target }}.tar.gz.sha256

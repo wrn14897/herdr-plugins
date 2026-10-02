@@ -1,0 +1,28 @@
+id = "warren.herdr-picker"
+name = "herdr picker"
+version = "0.1.0"
+# Needs session.snapshot with layouts and popup plugin panes.
+min_herdr_version = "0.7.5"
+description = "Fast popup to fuzzy-search open workspaces with a live preview of the active pane"
+platforms = ["macos", "linux"]
+
+# Downloads the prebuilt binary for this platform from the matching GitHub
+# release into bin/, falling back to `cargo build --release` when no asset exists.
+# `herdr plugin link` skips this; run `herdr/install.sh` yourself in a checkout.
+[[build]]
+command = ["bash", "herdr/install.sh"]
+
+# Bind with: [[keys.command]] key = "prefix+f" type = "plugin_action" command = "warren.herdr-picker.open"
+[[actions]]
+id = "open"
+title = "Open herdr picker"
+contexts = ["workspace", "tab", "pane"]
+command = ["sh", "herdr/open.sh"]
+
+[[panes]]
+id = "picker"
+title = "herdr picker"
+placement = "popup"
+width = "90%"
+height = "80%"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/bin/herdr-picker\""]

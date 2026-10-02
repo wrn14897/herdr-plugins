@@ -59,7 +59,6 @@ pub struct TabInfo {
 pub struct PaneInfo {
     pub pane_id: String,
     pub tab_id: String,
-    pub workspace_id: String,
     #[serde(default)]
     pub label: Option<String>,
     #[serde(default)]
@@ -90,6 +89,8 @@ pub struct Row {
     pub linked_worktree: bool,
     pub active_pane_id: Option<String>,
     pub tabs: Vec<TabRow>,
+    /// Precomputed metadata search text; see [`Row::refresh_haystack`].
+    pub haystack: String,
 }
 
 #[derive(Debug, Clone)]
@@ -110,52 +111,60 @@ pub struct PaneRow {
 
 /// Flattens a snapshot into one row per workspace, ordered by workspace number
 /// with the currently focused workspace last, so the initial selection is the
-/// most likely switch target.
+/// most likely switch target. Linear in the size of the snapshot.
 pub fn build_rows(snapshot: &Snapshot) -> Vec<Row> {
     let home = std::env::var("HOME").unwrap_or_default();
-    let focused_tab_pane: HashMap<&str, &str> = snapshot
+    let focused_ws = snapshot.focused_workspace_id.as_deref();
+
+    let focused_pane_of_tab: HashMap<&str, &str> = snapshot
         .layouts
         .iter()
         .filter_map(|l| Some((l.tab_id.as_str(), l.focused_pane_id.as_deref()?)))
         .collect();
-    let focused_ws = snapshot.focused_workspace_id.as_deref();
+    let pane_by_id: HashMap<&str, &PaneInfo> = snapshot
+        .panes
+        .iter()
+        .map(|p| (p.pane_id.as_str(), p))
+        .collect();
+    let mut panes_by_tab: HashMap<&str, Vec<&PaneInfo>> = HashMap::new();
+    for pane in &snapshot.panes {
+        panes_by_tab
+            .entry(pane.tab_id.as_str())
+            .or_default()
+            .push(pane);
+    }
+    let mut tabs_by_ws: HashMap<&str, Vec<&TabInfo>> = HashMap::new();
+    for tab in &snapshot.tabs {
+        tabs_by_ws
+            .entry(tab.workspace_id.as_str())
+            .or_default()
+            .push(tab);
+    }
 
     let mut rows: Vec<Row> = snapshot
         .workspaces
         .iter()
         .map(|ws| {
-            let mut tabs: Vec<&TabInfo> = snapshot
-                .tabs
-                .iter()
-                .filter(|t| t.workspace_id == ws.workspace_id)
-                .collect();
+            let mut tabs = tabs_by_ws
+                .remove(ws.workspace_id.as_str())
+                .unwrap_or_default();
             tabs.sort_by_key(|t| t.number);
 
             let active_tab = ws
                 .active_tab_id
                 .clone()
                 .or_else(|| tabs.first().map(|t| t.tab_id.clone()));
-            let active_pane_id = active_tab.as_deref().and_then(|tab| {
-                focused_tab_pane
+            let tab_panes = |tab: &str| panes_by_tab.get(tab).map_or(&[][..], Vec::as_slice);
+            let active_pane = active_tab.as_deref().and_then(|tab| {
+                focused_pane_of_tab
                     .get(tab)
-                    .map(|p| (*p).to_owned())
-                    .or_else(|| {
-                        snapshot
-                            .panes
-                            .iter()
-                            .find(|p| p.tab_id == tab)
-                            .map(|p| p.pane_id.clone())
-                    })
+                    .and_then(|id| pane_by_id.get(id).copied())
+                    .or_else(|| tab_panes(tab).first().copied())
             });
-
-            let cwd = active_pane_id
-                .as_deref()
-                .and_then(|id| snapshot.panes.iter().find(|p| p.pane_id == id))
+            let cwd = active_pane
                 .or_else(|| {
-                    snapshot
-                        .panes
-                        .iter()
-                        .find(|p| p.workspace_id == ws.workspace_id)
+                    tabs.iter()
+                        .find_map(|t| tab_panes(&t.tab_id).first().copied())
                 })
                 .and_then(|p| p.cwd.clone())
                 .unwrap_or_default();
@@ -163,15 +172,13 @@ pub fn build_rows(snapshot: &Snapshot) -> Vec<Row> {
             let tab_rows = tabs
                 .iter()
                 .map(|t| {
-                    let focused_pane = focused_tab_pane.get(t.tab_id.as_str()).copied();
+                    let focused_pane = focused_pane_of_tab.get(t.tab_id.as_str()).copied();
                     TabRow {
                         label: t.label.clone(),
                         status: t.agent_status.clone(),
                         active: active_tab.as_deref() == Some(t.tab_id.as_str()),
-                        panes: snapshot
-                            .panes
+                        panes: tab_panes(&t.tab_id)
                             .iter()
-                            .filter(|p| p.tab_id == t.tab_id)
                             .map(|p| PaneRow {
                                 label: p.label.clone().unwrap_or_else(|| p.pane_id.clone()),
                                 agent: p.agent.clone(),
@@ -183,7 +190,7 @@ pub fn build_rows(snapshot: &Snapshot) -> Vec<Row> {
                 })
                 .collect();
 
-            Row {
+            let mut row = Row {
                 workspace_id: ws.workspace_id.clone(),
                 number: ws.number,
                 label: ws.label.clone(),
@@ -193,14 +200,31 @@ pub fn build_rows(snapshot: &Snapshot) -> Vec<Row> {
                 cwd,
                 repo_name: ws.worktree.as_ref().and_then(|w| w.repo_name.clone()),
                 linked_worktree: ws.worktree.as_ref().is_some_and(|w| w.is_linked_worktree),
-                active_pane_id,
+                active_pane_id: active_pane.map(|p| p.pane_id.clone()),
                 tabs: tab_rows,
-            }
+                haystack: String::new(),
+            };
+            row.refresh_haystack(None);
+            row
         })
         .collect();
 
     rows.sort_by_key(|r| (r.focused, r.number));
     rows
+}
+
+impl Row {
+    /// Rebuilds the cached fuzzy-search text. The label and displayed cwd come
+    /// first so match positions map straight back onto the rendered row.
+    pub fn refresh_haystack(&mut self, branch: Option<&str>) {
+        let repo = self.repo_name.as_deref().unwrap_or("");
+        self.haystack = format!(
+            "{} {} {repo} {}",
+            self.label,
+            self.cwd_display,
+            branch.unwrap_or("")
+        );
+    }
 }
 
 pub fn tildify(path: &str, home: &str) -> String {

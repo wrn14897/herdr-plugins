@@ -1,9 +1,12 @@
 //! herdr-picker: fuzzy-search open herdr workspaces with a live preview.
 
 mod app;
+#[cfg(test)]
+mod bench_tests;
 mod git;
 mod herdr;
 mod model;
+mod pool;
 mod preview;
 mod search;
 mod ui;

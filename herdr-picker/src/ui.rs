@@ -4,11 +4,12 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 use crate::model::Row;
+use crate::search::Hit;
 
 const ACCENT: Color = Color::Cyan;
 const MATCH: Style = Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD);
@@ -55,37 +56,85 @@ fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
-    let items: Vec<ListItem> = app
-        .hits
+    let block = block().title(Line::from(" workspaces ").style(DIM));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.hits.is_empty() {
+        let msg = Rect {
+            x: inner.x + 1,
+            width: inner.width.saturating_sub(1),
+            ..inner
+        };
+        frame.render_widget(Paragraph::new("no matching workspaces").style(DIM), msg);
+        return;
+    }
+
+    // Only the visible window is materialized, so thousands of rows cost nothing per frame.
+    let height = inner.height as usize;
+    let selected = app.list.selected().unwrap_or(0);
+    let heights = |i: usize| hit_height(&app.hits[i]);
+    app.list_offset = window_start(app.list_offset, selected, app.hits.len(), height, heights);
+
+    let mut used = 0;
+    let items: Vec<ListItem> = app.hits[app.list_offset..]
         .iter()
-        .map(|hit| {
-            let row = &app.rows[hit.row];
-            let mut spans = vec![
-                Span::styled(format!("{:>2} ", row.number), DIM),
-                status_dot(&row.status),
-                Span::raw(" "),
-            ];
-            spans.extend(highlighted(&row.label, &hit.label, Style::new().bold()));
-            if row.focused {
-                spans.push(Span::styled(" (current)", DIM));
-            }
-            spans.push(Span::raw("  "));
-            spans.extend(highlighted(&row.cwd_display, &hit.cwd, DIM));
-            ListItem::new(Line::from(spans))
+        .take_while(|hit| {
+            used += hit_height(hit);
+            used <= height
         })
+        .map(|hit| ListItem::new(hit_lines(app, hit)))
         .collect();
 
-    let empty = items.is_empty();
     let list = List::new(items)
-        .block(block().title(Line::from(" workspaces ").style(DIM)))
         .highlight_style(Style::new().bg(Color::Indexed(237)))
         .highlight_symbol(Line::from("▌").fg(ACCENT));
-    frame.render_stateful_widget(list, area, &mut app.list);
+    let mut state = ListState::default().with_selected(Some(selected - app.list_offset));
+    frame.render_stateful_widget(list, inner, &mut state);
+}
 
-    if empty {
-        let inner = area.inner(ratatui::layout::Margin::new(2, 1));
-        frame.render_widget(Paragraph::new("no matching workspaces").style(DIM), inner);
+fn hit_height(_hit: &Hit) -> usize {
+    1
+}
+
+fn hit_lines(app: &App, hit: &Hit) -> Vec<Line<'static>> {
+    let row = &app.rows[hit.row];
+    let mut spans = vec![
+        Span::styled(format!("{:>2} ", row.number), DIM),
+        status_dot(&row.status),
+        Span::raw(" "),
+    ];
+    spans.extend(highlighted(&row.label, &hit.label, Style::new().bold()));
+    if row.focused {
+        spans.push(Span::styled(" (current)", DIM));
     }
+    spans.push(Span::raw("  "));
+    spans.extend(highlighted(&row.cwd_display, &hit.cwd, DIM));
+    vec![Line::from(spans)]
+}
+
+/// First visible item index so `selected` stays on screen, scrolling as little
+/// as possible and never leaving blank space below the last item.
+fn window_start(
+    offset: usize,
+    selected: usize,
+    len: usize,
+    height: usize,
+    item_height: impl Fn(usize) -> usize,
+) -> usize {
+    if len == 0 || height == 0 {
+        return 0;
+    }
+    let selected = selected.min(len - 1);
+    let mut start = offset.min(selected);
+    let span = |from: usize, to: usize| (from..=to).map(&item_height).sum::<usize>();
+    while start < selected && span(start, selected) > height {
+        start += 1;
+    }
+    while start > 0 && span(start - 1, len - 1) <= height {
+        start -= 1;
+    }
+    start
 }
 
 fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
@@ -271,6 +320,23 @@ fn status_dot(status: &str) -> Span<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_keeps_selection_visible() {
+        let one = |_| 1;
+        assert_eq!(window_start(0, 0, 100, 10, one), 0);
+        assert_eq!(window_start(0, 15, 100, 10, one), 6);
+        assert_eq!(window_start(6, 3, 100, 10, one), 3);
+        // Near the end, the window is pulled back to fill the area.
+        assert_eq!(window_start(95, 99, 100, 10, one), 90);
+        // Fewer items than rows: always start at the top.
+        assert_eq!(window_start(4, 2, 5, 10, one), 0);
+        // Variable heights.
+        assert_eq!(
+            window_start(0, 4, 10, 6, |i| if i % 2 == 0 { 2 } else { 1 }),
+            1
+        );
+    }
 
     #[test]
     fn highlighted_groups_runs() {

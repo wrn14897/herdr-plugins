@@ -1,6 +1,6 @@
 //! Picker state and input handling.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,7 @@ use ratatui::widgets::ListState;
 use crate::git::{self, GitInfo};
 use crate::herdr::Client;
 use crate::model::{self, Row};
+use crate::pool::Pool;
 use crate::preview::{self, Screen};
 use crate::search::{Hit, Searcher};
 use crate::ui;
@@ -20,6 +21,8 @@ use crate::ui;
 /// How often the selected pane's screen is re-read while the picker is idle.
 const PREVIEW_REFRESH: Duration = Duration::from_millis(400);
 const TICK: Duration = Duration::from_millis(40);
+/// Background workers shared by git, screen, and transcript lookups.
+const WORKERS: usize = 4;
 
 #[derive(Debug)]
 pub struct App {
@@ -27,11 +30,13 @@ pub struct App {
     pub rows: Vec<Row>,
     pub hits: Vec<Hit>,
     pub list: ListState,
+    pub list_offset: usize,
     pub query: String,
     pub git: HashMap<String, Option<GitInfo>>,
     pub screens: HashMap<String, Result<Text<'static>, String>>,
     pub error: Option<String>,
     searcher: Searcher,
+    pool: Pool,
     git_tx: Sender<(String, Option<GitInfo>)>,
     git_rx: Receiver<(String, Option<GitInfo>)>,
     preview_tx: Sender<String>,
@@ -50,11 +55,13 @@ impl App {
             rows: Vec::new(),
             hits: Vec::new(),
             list: ListState::default(),
+            list_offset: 0,
             query: String::new(),
             git: HashMap::new(),
             screens: HashMap::new(),
             error: None,
             searcher: Searcher::new(),
+            pool: Pool::new(WORKERS),
             git_tx,
             git_rx,
             preview_tx,
@@ -88,13 +95,16 @@ impl App {
     fn reload(&mut self) -> Result<()> {
         let snapshot = self.client.snapshot()?;
         self.rows = model::build_rows(&snapshot);
-        let missing: Vec<&str> = self
-            .rows
-            .iter()
-            .map(|r| r.cwd.as_str())
-            .filter(|c| !self.git.contains_key(*c))
-            .collect();
-        git::spawn_lookups(missing, &self.git_tx);
+        let mut queued = HashSet::new();
+        for row in &mut self.rows {
+            match self.git.get(&row.cwd) {
+                Some(info) => row.refresh_haystack(info.as_ref().map(|g| g.branch.as_str())),
+                None if !row.cwd.is_empty() && queued.insert(row.cwd.clone()) => {
+                    git::queue_lookup(&self.pool, row.cwd.clone(), self.git_tx.clone());
+                }
+                None => {}
+            }
+        }
         self.refilter_keep();
         Ok(())
     }
@@ -113,14 +123,7 @@ impl App {
         let selected_id = keep_selection
             .then(|| self.selected().map(|r| r.workspace_id.clone()))
             .flatten();
-        let git = &self.git;
-        self.hits = self.searcher.search(&self.query, &self.rows, |r| {
-            let branch = git
-                .get(&r.cwd)
-                .and_then(Option::as_ref)
-                .map_or("", |g| g.branch.as_str());
-            format!("{} {branch}", r.repo_name.as_deref().unwrap_or(""))
-        });
+        self.hits = self.searcher.search(&self.query, &self.rows);
         let keep = selected_id.and_then(|id| {
             self.hits
                 .iter()
@@ -141,6 +144,10 @@ impl App {
     fn drain_background(&mut self) {
         let mut git_changed = false;
         while let Ok((dir, info)) = self.git_rx.try_recv() {
+            let branch = info.as_ref().map(|g| g.branch.as_str());
+            for row in self.rows.iter_mut().filter(|r| r.cwd == dir) {
+                row.refresh_haystack(branch);
+            }
             self.git.insert(dir, info);
             git_changed = true;
         }

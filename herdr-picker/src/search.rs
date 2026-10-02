@@ -31,13 +31,7 @@ impl Searcher {
     }
 
     /// Returns matching rows, best first. An empty query keeps the input order.
-    /// `extra` supplies searchable-but-not-highlighted text per row (e.g. git branch).
-    pub fn search(
-        &mut self,
-        query: &str,
-        rows: &[Row],
-        extra: impl Fn(&Row) -> String,
-    ) -> Vec<Hit> {
+    pub fn search(&mut self, query: &str, rows: &[Row]) -> Vec<Hit> {
         if query.trim().is_empty() {
             return (0..rows.len())
                 .map(|row| Hit {
@@ -53,6 +47,9 @@ impl Searcher {
             .iter()
             .enumerate()
             .filter_map(|(row, r)| {
+                // Cheap rejection first: anything matching a field also matches the
+                // full haystack, so most non-matching rows cost a single score call.
+                pattern.score(Utf32Str::new(&r.haystack, &mut self.buf), &mut self.matcher)?;
                 // Prefer matches inside the label: they are what users type for.
                 if let Some(score) = self.indices_of(&pattern, &r.label) {
                     let label = self.indices.iter().map(|&i| i as usize).collect();
@@ -65,8 +62,7 @@ impl Searcher {
                         },
                     ));
                 }
-                let haystack = format!("{} {} {}", r.label, r.cwd_display, extra(r));
-                let score = self.indices_of(&pattern, &haystack)?;
+                let score = self.indices_of(&pattern, &r.haystack)?;
 
                 let label_len = r.label.chars().count();
                 let cwd_start = label_len + 1;
@@ -112,7 +108,11 @@ mod tests {
     use super::*;
 
     fn row(label: &str, cwd: &str) -> Row {
-        Row {
+        row_with(label, cwd, None)
+    }
+
+    fn row_with(label: &str, cwd: &str, branch: Option<&str>) -> Row {
+        let mut row = Row {
             workspace_id: label.into(),
             number: 0,
             label: label.into(),
@@ -124,13 +124,16 @@ mod tests {
             linked_worktree: false,
             active_pane_id: None,
             tabs: Vec::new(),
-        }
+            haystack: String::new(),
+        };
+        row.refresh_haystack(branch);
+        row
     }
 
     #[test]
     fn empty_query_keeps_order() {
         let rows = [row("a", "/x"), row("b", "/y")];
-        let hits = Searcher::new().search("", &rows, |_| String::new());
+        let hits = Searcher::new().search("", &rows);
         assert_eq!(hits.iter().map(|h| h.row).collect::<Vec<_>>(), [0, 1]);
     }
 
@@ -142,26 +145,20 @@ mod tests {
             row("api", "~/srv"),
         ];
         let mut s = Searcher::new();
-        let hits = s.search("dot", &rows, |_| String::new());
+        let hits = s.search("dot", &rows);
         assert_eq!(hits[0].row, 1);
         assert_eq!(hits[0].label, [0, 1, 2]);
 
-        let hits = s.search("srv", &rows, |_| String::new());
+        let hits = s.search("srv", &rows);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].row, 2);
         assert_eq!(hits[0].cwd, [2, 3, 4]);
     }
 
     #[test]
-    fn extra_text_is_searchable() {
-        let rows = [row("a", "/x"), row("b", "/y")];
-        let hits = Searcher::new().search("feature", &rows, |r| {
-            if r.label == "b" {
-                "feature/login".into()
-            } else {
-                String::new()
-            }
-        });
+    fn branch_is_searchable() {
+        let rows = [row("a", "/x"), row_with("b", "/y", Some("feature/login"))];
+        let hits = Searcher::new().search("feature", &rows);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].row, 1);
     }

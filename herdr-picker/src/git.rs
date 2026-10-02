@@ -1,9 +1,9 @@
-//! Background git branch/dirty lookups so first paint never waits on git.
+//! Git branch/dirty lookups on the shared worker pool, so first paint never waits on git.
 
-use std::collections::HashSet;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::thread;
+
+use crate::pool::Pool;
 
 #[derive(Debug, Clone)]
 pub struct GitInfo {
@@ -11,23 +11,12 @@ pub struct GitInfo {
     pub dirty: bool,
 }
 
-/// Spawns one lookup thread per distinct directory; results arrive on `tx`.
-pub fn spawn_lookups<'a>(
-    dirs: impl IntoIterator<Item = &'a str>,
-    tx: &Sender<(String, Option<GitInfo>)>,
-) {
-    let mut seen = HashSet::new();
-    for dir in dirs {
-        if dir.is_empty() || !seen.insert(dir.to_owned()) {
-            continue;
-        }
-        let dir = dir.to_owned();
-        let tx = tx.clone();
-        thread::spawn(move || {
-            let info = lookup(&dir);
-            let _ = tx.send((dir, info));
-        });
-    }
+/// Queues one lookup per directory; results arrive on `tx`.
+pub fn queue_lookup(pool: &Pool, dir: String, tx: Sender<(String, Option<GitInfo>)>) {
+    pool.submit(false, move || {
+        let info = lookup(&dir);
+        let _ = tx.send((dir, info));
+    });
 }
 
 fn lookup(dir: &str) -> Option<GitInfo> {

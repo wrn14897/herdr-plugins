@@ -3,8 +3,10 @@
 mod app;
 #[cfg(test)]
 mod bench_tests;
+mod content;
 mod git;
 mod herdr;
+mod index;
 mod model;
 mod pool;
 mod preview;
@@ -25,6 +27,8 @@ herdr-picker - fuzzy-search herdr workspaces with a live preview
 USAGE:
     herdr-picker          open the interactive picker
     herdr-picker --list   print workspaces as TSV (id, number, label, status, cwd, active pane)
+    herdr-picker --search QUERY
+                          index everything, then print ranked matches (no UI)
     herdr-picker --help   show this message
 
 KEYS:
@@ -36,6 +40,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         None => run_picker(),
         Some("--list") => list(),
+        Some("--search") => search(&args[1..].join(" ")),
         Some("-h" | "--help") => {
             println!("{USAGE}");
             Ok(())
@@ -78,6 +83,49 @@ fn list() -> Result<()> {
             row.status,
             row.cwd,
             row.active_pane_id.unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn search(query: &str) -> Result<()> {
+    use std::collections::HashMap;
+
+    let client = Client::from_env();
+    let mut rows = model::build_rows(&client.snapshot()?);
+    let mut stores: HashMap<String, content::Store> = HashMap::new();
+    for row in &mut rows {
+        for pane in row.indexed_panes() {
+            let job = index::PaneJob {
+                workspace_id: row.workspace_id.clone(),
+                pane_id: pane.pane_id.clone(),
+                pane_label: pane.short_name(),
+            };
+            let update = index::read_screen(&client, &job);
+            stores
+                .entry(update.workspace_id)
+                .or_default()
+                .set_segment(update.key, update.segment);
+        }
+    }
+
+    let mut hits = search::Searcher::new().search(query, &rows);
+    if let Some(content_query) = content::Query::parse(query) {
+        search::merge_content(&mut hits, &rows, &content_query, |row| {
+            stores.get(&row.workspace_id)
+        });
+    }
+    for hit in hits {
+        let row = &rows[hit.row];
+        let detail = hit.detail.map_or(String::new(), |d| {
+            format!("\t{}: {}", d.badge.unwrap_or_default(), d.text)
+        });
+        println!(
+            "{}\t{}\t{}\t{} content hits{detail}",
+            row.workspace_id,
+            hit.kind.badge(),
+            row.label,
+            hit.content.len()
         );
     }
     Ok(())

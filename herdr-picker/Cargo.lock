@@ -483,6 +483,7 @@ dependencies = [
  "crossterm",
  "nucleo-matcher",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "unicode-width",

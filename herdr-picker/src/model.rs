@@ -122,10 +122,28 @@ pub struct TabRow {
 
 #[derive(Debug, Clone)]
 pub struct PaneRow {
+    pub pane_id: String,
     pub label: String,
     pub agent: Option<String>,
     pub status: String,
     pub focused: bool,
+}
+
+impl PaneRow {
+    /// A compact name for badges: the agent kind, or the pane label trimmed.
+    pub fn short_name(&self) -> String {
+        const MAX: usize = 18;
+        if let Some(agent) = &self.agent {
+            return agent.clone();
+        }
+        // Pane labels look like `name › terminal title`; the first part names it.
+        let name = self.label.split(" › ").next().unwrap_or(&self.label).trim();
+        if name.chars().count() > MAX {
+            format!("{}…", name.chars().take(MAX - 1).collect::<String>())
+        } else {
+            name.to_owned()
+        }
+    }
 }
 
 /// Flattens a snapshot into one row per workspace, ordered by workspace number
@@ -199,6 +217,7 @@ pub fn build_rows(snapshot: &Snapshot) -> Vec<Row> {
                         panes: tab_panes(&t.tab_id)
                             .iter()
                             .map(|p| PaneRow {
+                                pane_id: p.pane_id.clone(),
                                 label: p.label.clone().unwrap_or_else(|| p.pane_id.clone()),
                                 agent: p.agent.clone(),
                                 status: p.agent_status.clone(),
@@ -278,6 +297,14 @@ fn is_shell_title(title: &str) -> bool {
 }
 
 impl Row {
+    /// Panes worth indexing for content search: every agent pane, plus the
+    /// pane you would land on.
+    pub fn indexed_panes(&self) -> impl Iterator<Item = &PaneRow> {
+        self.tabs.iter().flat_map(|t| &t.panes).filter(|p| {
+            p.agent.is_some() || self.active_pane_id.as_deref() == Some(p.pane_id.as_str())
+        })
+    }
+
     pub fn set_branch(&mut self, branch: Option<&str>) {
         self.branch = branch.map(str::to_owned);
         self.refresh_haystack();

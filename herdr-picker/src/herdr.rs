@@ -83,6 +83,25 @@ impl Client {
             .ok_or_else(|| anyhow!("pane.read: missing text"))
     }
 
+    /// Recent scrollback of a pane as plain text, soft wraps joined.
+    pub fn read_recent(&self, pane_id: &str, lines: u32) -> Result<String> {
+        let result = self.request(
+            "pane.read",
+            &json!({ "pane_id": pane_id, "source": "recent_unwrapped", "format": "text", "lines": lines }),
+        )?;
+        result
+            .pointer("/read/text")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("pane.read: missing text"))
+    }
+
+    /// Focuses the agent pane (switching workspace and tab as needed).
+    pub fn focus_agent(&self, pane_id: &str) -> Result<()> {
+        self.request("agent.focus", &json!({ "target": pane_id }))?;
+        Ok(())
+    }
+
     pub fn focus_workspace(&self, workspace_id: &str) -> Result<()> {
         self.request("workspace.focus", &json!({ "workspace_id": workspace_id }))?;
         Ok(())

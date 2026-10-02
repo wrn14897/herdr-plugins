@@ -5,9 +5,9 @@ use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Paragraph};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::App;
+use crate::app::{App, View};
 use crate::model::Row;
 use crate::search::Hit;
 
@@ -33,9 +33,17 @@ fn block() -> Block<'static> {
 }
 
 fn draw_search(frame: &mut Frame, app: &App, area: Rect) {
-    let count = format!(" {}/{} ", app.hits.len(), app.rows.len());
+    let mut count = format!(" {}/{} ", app.hits.len(), app.rows.len());
+    if app.index_pending > 0 {
+        let done = app.index_total - app.index_pending;
+        count = format!(" indexing {done}/{} ·{count}", app.index_total);
+    }
     let hint = match &app.error {
         Some(err) => Line::from(format!(" {err} ")).red(),
+        None if app.current_content().is_some() => {
+            Line::from(" enter focus · alt-j/k next/prev hit · ctrl-s hits/screen · esc ")
+                .style(DIM)
+        }
         None => Line::from(" enter focus · esc clear/close · ctrl-r refresh ").style(DIM),
     };
     let block = block()
@@ -113,13 +121,17 @@ fn hit_lines(app: &App, hit: &Hit) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(spans)];
 
     if let Some(detail) = &hit.detail {
+        let badge = detail
+            .badge
+            .clone()
+            .unwrap_or_else(|| hit.kind.badge().to_owned());
         let mut spans = vec![
             Span::styled("     ↳ ", DIM),
-            Span::styled(
-                format!("{} ", hit.kind.badge()),
-                Style::new().fg(Color::Blue),
-            ),
+            Span::styled(format!("{badge}  "), Style::new().fg(Color::Blue)),
         ];
+        if hit.kind.is_content() && hit.content.len() > 1 {
+            spans.push(Span::styled(format!("+{} ", hit.content.len() - 1), DIM));
+        }
         spans.extend(highlighted(&detail.text, &detail.indices, Style::new()));
         lines.push(Line::from(spans));
     }
@@ -170,15 +182,51 @@ fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         header.extend(tree);
     }
-    let rule = format!(" screen {} ", row.active_pane_id.as_deref().unwrap_or("-"));
+    let view = app.view();
+    let rule = match (view, app.current_content()) {
+        (View::Hits, Some((store, hit, cursor, total))) => {
+            format!(
+                " {} {}/{total} ",
+                store.doc(hit.doc).source.badge(),
+                cursor + 1
+            )
+        }
+        (_, content) => {
+            let more = content.map_or(String::new(), |(.., total)| {
+                format!(
+                    "· {total} hit{} (ctrl-s) ",
+                    if total == 1 { "" } else { "s" }
+                )
+            });
+            format!(
+                " screen {} {more}",
+                row.active_pane_id.as_deref().unwrap_or("-")
+            )
+        }
+    };
     let fill = (inner.width as usize).saturating_sub(rule.width() + 2);
-    header.push(Line::styled(format!("──{rule}{}", "─".repeat(fill)), DIM));
+    let rule_style = if view == View::Hits {
+        Style::new().fg(Color::Blue)
+    } else {
+        DIM
+    };
+    header.push(Line::styled(
+        format!("──{rule}{}", "─".repeat(fill)),
+        rule_style,
+    ));
 
     let header_height = (header.len() as u16).min(inner.height);
     let [head, screen] =
         Layout::vertical([Constraint::Length(header_height), Constraint::Min(0)]).areas(inner);
     frame.render_widget(Paragraph::new(Text::from(header)), head);
 
+    if view == View::Hits {
+        frame.render_widget(
+            Paragraph::new(hit_view(app, screen.width, screen.height)),
+            screen,
+        );
+        return;
+    }
     let screen_text = match row.active_pane_id.as_ref().and_then(|p| app.screens.get(p)) {
         Some(Ok(text)) => {
             // Bottom-align: the newest output (and any prompt) lives at the end.
@@ -189,6 +237,117 @@ fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
         None => Text::styled("loading…", DIM),
     };
     frame.render_widget(Paragraph::new(screen_text), screen);
+}
+
+/// The selected content hit in context: the whole chat message, or the
+/// surrounding scrollback lines, wrapped and scrolled so the hit is in view.
+fn hit_view(app: &App, width: u16, height: u16) -> Text<'static> {
+    let (Some((store, hit, ..)), Some(query)) = (app.current_content(), &app.content_query) else {
+        return Text::default();
+    };
+    let (width, height) = (usize::from(width).max(10), usize::from(height));
+    let source = &store.doc(hit.doc).source;
+
+    // Context: neighbouring screen lines of the same pane, or the single message.
+    let (first, last) = if source.is_chat() {
+        (hit.doc, hit.doc)
+    } else {
+        let same = |i: usize| store.doc(i).source == *source;
+        let reach = height / 2;
+        let mut first = hit.doc;
+        while first > 0 && hit.doc - first < reach && same(first - 1) {
+            first -= 1;
+        }
+        let mut last = hit.doc;
+        while last + 1 < store.doc_count() && last - hit.doc < reach && same(last + 1) {
+            last += 1;
+        }
+        (first, last)
+    };
+    let mut text = String::new();
+    let mut focus = 0;
+    for i in first..=last {
+        if i == hit.doc {
+            focus = text.len() + (hit.range.start - store.doc(i).range.start);
+        }
+        text.push_str(store.doc_text(i));
+        text.push('\n');
+    }
+
+    let ranges = query.highlight_ranges(&text);
+    let (lines, focus_line) = wrap_highlighted(&text, &ranges, focus, width);
+    let start = focus_line
+        .saturating_sub(height / 3)
+        .min(lines.len().saturating_sub(height));
+    Text::from(
+        lines
+            .into_iter()
+            .skip(start)
+            .take(height)
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Hard-wraps `text` to `width` columns, styling `ranges` (sorted byte ranges)
+/// as matches and the range starting at `focus` as the current hit. Returns the
+/// lines and the index of the line containing `focus`.
+fn wrap_highlighted(
+    text: &str,
+    ranges: &[std::ops::Range<usize>],
+    focus: usize,
+    width: usize,
+) -> (Vec<Line<'static>>, usize) {
+    let current = MATCH.add_modifier(Modifier::REVERSED);
+    let mut lines = Vec::new();
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let (mut run, mut run_style, mut col) = (String::new(), Style::new(), 0);
+    let mut focus_line = 0;
+    let mut next_range = 0;
+
+    let flush_run = |spans: &mut Vec<Span<'static>>, run: &mut String, style: Style| {
+        if !run.is_empty() {
+            spans.push(Span::styled(std::mem::take(run), style));
+        }
+    };
+
+    for (pos, ch) in text.char_indices() {
+        while next_range < ranges.len() && ranges[next_range].end <= pos {
+            next_range += 1;
+        }
+        let style = match ranges.get(next_range) {
+            Some(r) if r.contains(&pos) => {
+                let in_focus = ranges[next_range].start <= focus && focus < ranges[next_range].end;
+                if in_focus { current } else { MATCH }
+            }
+            _ => Style::new(),
+        };
+        if pos == focus {
+            focus_line = lines.len();
+        }
+        let ch_width = ch.width().unwrap_or(0);
+        if ch == '\n' || col + ch_width > width {
+            flush_run(&mut spans, &mut run, run_style);
+            lines.push(Line::from(std::mem::take(&mut spans)));
+            col = 0;
+            if ch == '\n' {
+                continue;
+            }
+            if pos == focus {
+                focus_line = lines.len();
+            }
+        }
+        if style != run_style {
+            flush_run(&mut spans, &mut run, run_style);
+            run_style = style;
+        }
+        run.push(ch);
+        col += ch_width;
+    }
+    flush_run(&mut spans, &mut run, run_style);
+    if !spans.is_empty() {
+        lines.push(Line::from(spans));
+    }
+    (lines, focus_line)
 }
 
 fn header_lines(app: &App, row: &Row) -> Vec<Line<'static>> {
@@ -349,6 +508,29 @@ mod tests {
             window_start(0, 4, 10, 6, |i| if i % 2 == 0 { 2 } else { 1 }),
             1
         );
+    }
+
+    #[test]
+    fn wrap_highlighted_finds_focus_line() {
+        let text = "alpha beta\ngamma delta epsilon";
+        let ranges = [6..10, 17..22];
+        let (lines, focus) = wrap_highlighted(text, &ranges, 17, 8);
+        let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        assert_eq!(rendered, ["alpha be", "ta", "gamma de", "lta epsi", "lon"]);
+        assert_eq!(focus, 2);
+        // The focused match is styled differently from other matches.
+        let style_of = |line: usize, text: &str| {
+            lines[line]
+                .spans
+                .iter()
+                .find(|s| s.content == text)
+                .map(|s| s.style)
+        };
+        assert_eq!(
+            style_of(2, "de"),
+            Some(MATCH.add_modifier(Modifier::REVERSED))
+        );
+        assert_eq!(style_of(0, "be"), Some(MATCH));
     }
 
     #[test]

@@ -64,9 +64,13 @@ download() {
 }
 
 build_from_source() {
-  local cargo
+  local cargo candidate
   cargo="$(command -v cargo || true)"
-  [ -n "$cargo" ] || [ ! -x "$HOME/.cargo/bin/cargo" ] || cargo="$HOME/.cargo/bin/cargo"
+  # Plugin builds may not inherit an interactive PATH; check common installs.
+  for candidate in "$HOME/.cargo/bin/cargo" /opt/homebrew/opt/rustup/bin/cargo /usr/local/opt/rustup/bin/cargo; do
+    [ -n "$cargo" ] && break
+    [ -x "$candidate" ] && cargo="$candidate"
+  done
   if [ -z "$cargo" ]; then
     log "no release asset and cargo is not installed; install Rust (https://rustup.rs) and reinstall" >&2
     return 1

@@ -8,6 +8,9 @@
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
+use std::collections::HashMap;
+
+use crate::content::{self, ContentHit, Store};
 use crate::model::{FieldKind, Row};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +22,10 @@ pub enum MatchKind {
     Path,
     Repo,
     Branch,
+    /// Matched only inside agent conversation history.
+    Chat,
+    /// Matched only inside pane scrollback.
+    Screen,
 }
 
 impl MatchKind {
@@ -27,7 +34,13 @@ impl MatchKind {
             Self::All | Self::Label => 0,
             Self::Field(_) => 1,
             Self::Path | Self::Repo | Self::Branch => 2,
+            Self::Chat => 3,
+            Self::Screen => 4,
         }
+    }
+
+    pub fn is_content(self) -> bool {
+        matches!(self, Self::Chat | Self::Screen)
     }
 
     pub fn badge(self) -> &'static str {
@@ -40,6 +53,8 @@ impl MatchKind {
             Self::Path => "path",
             Self::Repo => "repo",
             Self::Branch => "branch",
+            Self::Chat => "chat",
+            Self::Screen => "screen",
         }
     }
 }
@@ -47,6 +62,8 @@ impl MatchKind {
 /// A match shown on a second line under the row, e.g. a matching tab name.
 #[derive(Debug, Clone)]
 pub struct Detail {
+    /// Overrides the kind's badge, e.g. `chat · claude`.
+    pub badge: Option<String>,
     pub text: String,
     /// Matched char positions within `text`.
     pub indices: Vec<usize>,
@@ -62,10 +79,12 @@ pub struct Hit {
     /// Matched char positions within the displayed cwd.
     pub cwd: Vec<usize>,
     pub detail: Option<Detail>,
+    /// Content matches inside this workspace, best first.
+    pub content: Vec<ContentHit>,
 }
 
 impl Hit {
-    fn new(row: usize, kind: MatchKind, score: u32) -> Self {
+    pub fn new(row: usize, kind: MatchKind, score: u32) -> Self {
         Self {
             row,
             kind,
@@ -73,9 +92,57 @@ impl Hit {
             label: Vec::new(),
             cwd: Vec::new(),
             detail: None,
+            content: Vec::new(),
         }
     }
 }
+
+/// Attaches content matches to metadata hits, adds rows that only match by
+/// content, and re-ranks. `store_of` returns the content store for a row.
+pub fn merge_content<'a>(
+    hits: &mut Vec<Hit>,
+    rows: &'a [Row],
+    query: &content::Query,
+    store_of: impl Fn(&'a Row) -> Option<&'a Store>,
+) {
+    let mut position: HashMap<usize, usize> =
+        hits.iter().enumerate().map(|(i, h)| (h.row, i)).collect();
+    for (i, row) in rows.iter().enumerate() {
+        let Some(store) = store_of(row).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let found = query.search(store);
+        let Some(best) = found.first() else { continue };
+        if let Some(&at) = position.get(&i) {
+            hits[at].content = found;
+            continue;
+        }
+        let source = &store.doc(best.doc).source;
+        let kind = if source.is_chat() {
+            MatchKind::Chat
+        } else {
+            MatchKind::Screen
+        };
+        let (text, indices) = content::snippet(store, best, query, SNIPPET_CHARS);
+        let mut hit = Hit::new(i, kind, u32::try_from(found.len()).unwrap_or(u32::MAX));
+        hit.detail = Some(Detail {
+            badge: Some(source.badge()),
+            text,
+            indices,
+        });
+        hit.content = found;
+        position.insert(i, hits.len());
+        hits.push(hit);
+    }
+    // Content matches in the current workspace (often your own session echoing
+    // the query) rank after other workspaces, like the default list order.
+    hits.sort_by_key(|h| {
+        let focused = h.kind.is_content() && rows[h.row].focused;
+        (h.kind.tier(), focused, std::cmp::Reverse(h.score))
+    });
+}
+
+const SNIPPET_CHARS: usize = 120;
 
 #[derive(Debug)]
 pub struct Searcher {
@@ -132,6 +199,7 @@ impl Searcher {
             {
                 let mut hit = Hit::new(i, MatchKind::Field(field.kind), score);
                 hit.detail = Some(Detail {
+                    badge: None,
                     text: field.text.clone(),
                     indices: self.positions(),
                 });
@@ -156,6 +224,7 @@ impl Searcher {
             {
                 let mut hit = Hit::new(i, kind, score);
                 hit.detail = Some(Detail {
+                    badge: None,
                     text: text.clone(),
                     indices: self.positions(),
                 });

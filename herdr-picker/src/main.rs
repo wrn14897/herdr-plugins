@@ -3,6 +3,7 @@
 mod app;
 #[cfg(test)]
 mod bench_tests;
+mod config;
 mod content;
 mod git;
 mod herdr;
@@ -11,6 +12,7 @@ mod model;
 mod pool;
 mod preview;
 mod search;
+mod transcript;
 mod ui;
 
 use std::process::ExitCode;
@@ -19,6 +21,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::app::App;
+use crate::config::Config;
 use crate::herdr::Client;
 
 const USAGE: &str = "\
@@ -65,7 +68,7 @@ fn main() -> ExitCode {
 
 fn run_picker() -> Result<()> {
     // Connect and snapshot before taking over the terminal so failures print plainly.
-    let app = App::new(Client::from_env())?;
+    let app = App::new(Client::from_env(), Config::load()?)?;
     let mut terminal = ratatui::init();
     let result = app.run(&mut terminal);
     ratatui::restore();
@@ -92,20 +95,17 @@ fn search(query: &str) -> Result<()> {
     use std::collections::HashMap;
 
     let client = Client::from_env();
-    let mut rows = model::build_rows(&client.snapshot()?);
+    let config = Config::load()?;
+    let rows = model::build_rows(&client.snapshot()?);
+    let versions = index::Versions::default();
     let mut stores: HashMap<String, content::Store> = HashMap::new();
-    for row in &mut rows {
-        for pane in row.indexed_panes() {
-            let job = index::PaneJob {
-                workspace_id: row.workspace_id.clone(),
-                pane_id: pane.pane_id.clone(),
-                pane_label: pane.short_name(),
-            };
-            let update = index::read_screen(&client, &job);
+    for task in rows.iter().flat_map(|row| index::tasks_for(row, &config)) {
+        let update = index::run(&client, &versions, &task);
+        if let Some(segment) = update.segment {
             stores
                 .entry(update.workspace_id)
                 .or_default()
-                .set_segment(update.key, update.segment);
+                .set_segment(update.key, segment);
         }
     }
 

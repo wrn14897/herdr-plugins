@@ -12,7 +12,6 @@ use regex::{Regex, RegexBuilder};
 
 /// Where a document came from. Ordered by how useful a hit is (chat first).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Chat sources are produced by the transcript readers.
 pub enum Source {
     Chat {
         pane_id: String,
@@ -26,7 +25,6 @@ pub enum Source {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Role {
     User,
     Assistant,

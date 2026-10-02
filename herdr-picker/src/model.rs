@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use crate::transcript::SessionRef;
+
 #[derive(Debug, Default, Deserialize)]
 pub struct Snapshot {
     #[serde(default)]
@@ -69,6 +71,8 @@ pub struct PaneInfo {
     pub agent_status: String,
     #[serde(default)]
     pub terminal_title_stripped: Option<String>,
+    #[serde(default)]
+    pub agent_session: Option<SessionRef>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -127,6 +131,8 @@ pub struct PaneRow {
     pub agent: Option<String>,
     pub status: String,
     pub focused: bool,
+    pub cwd: String,
+    pub session: Option<SessionRef>,
 }
 
 impl PaneRow {
@@ -222,6 +228,8 @@ pub fn build_rows(snapshot: &Snapshot) -> Vec<Row> {
                                 agent: p.agent.clone(),
                                 status: p.agent_status.clone(),
                                 focused: focused_pane == Some(p.pane_id.as_str()),
+                                cwd: p.cwd.clone().unwrap_or_default(),
+                                session: p.agent_session.clone(),
                             })
                             .collect(),
                     }

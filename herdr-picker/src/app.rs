@@ -10,10 +10,11 @@ use ratatui::DefaultTerminal;
 use ratatui::text::Text;
 use ratatui::widgets::ListState;
 
+use crate::config::Config;
 use crate::content::{self, ContentHit, Store};
 use crate::git::{self, GitInfo};
 use crate::herdr::Client;
-use crate::index::{self, PaneJob, Update};
+use crate::index::{self, Update, Versions};
 use crate::model::{self, Row};
 use crate::pool::Pool;
 use crate::preview::{self, Screen};
@@ -40,6 +41,8 @@ pub enum View {
 #[derive(Debug)]
 pub struct App {
     client: Client,
+    config: Config,
+    versions: Versions,
     pub rows: Vec<Row>,
     pub hits: Vec<Hit>,
     pub list: ListState,
@@ -69,13 +72,15 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(client: Client) -> Result<Self> {
+    pub fn new(client: Client, config: Config) -> Result<Self> {
         let (git_tx, git_rx) = channel();
         let (index_tx, index_rx) = channel();
         let (screen_tx, screen_rx) = channel();
         let preview_tx = preview::spawn_worker(client.clone(), screen_tx);
         let mut app = Self {
             client,
+            config,
+            versions: Versions::default(),
             rows: Vec::new(),
             hits: Vec::new(),
             list: ListState::default(),
@@ -144,6 +149,9 @@ impl App {
         // Drop stores of closed workspaces, then (re)index everything.
         let live: HashSet<&str> = self.rows.iter().map(|r| r.workspace_id.as_str()).collect();
         self.stores.retain(|id, _| live.contains(id.as_str()));
+        if let Ok(mut versions) = self.versions.lock() {
+            versions.clear();
+        }
         self.index_pending = 0;
         self.index_total = 0;
         for i in 0..self.rows.len() {
@@ -155,18 +163,17 @@ impl App {
     }
 
     fn queue_row_index(&mut self, row: usize, urgent: bool) {
-        let jobs: Vec<PaneJob> = self.rows[row]
-            .indexed_panes()
-            .map(|p| PaneJob {
-                workspace_id: self.rows[row].workspace_id.clone(),
-                pane_id: p.pane_id.clone(),
-                pane_label: p.short_name(),
-            })
-            .collect();
-        for job in jobs {
+        for task in index::tasks_for(&self.rows[row], &self.config) {
             self.index_pending += 1;
             self.index_total += 1;
-            index::queue_screen(&self.pool, &self.client, job, urgent, self.index_tx.clone());
+            index::queue(
+                &self.pool,
+                &self.client,
+                &self.versions,
+                task,
+                urgent,
+                self.index_tx.clone(),
+            );
         }
     }
 
@@ -260,11 +267,13 @@ impl App {
         }
         while let Ok(update) = self.index_rx.try_recv() {
             self.index_pending = self.index_pending.saturating_sub(1);
-            self.stores
-                .entry(update.workspace_id)
-                .or_default()
-                .set_segment(update.key, update.segment);
-            changed |= self.content_query.is_some();
+            if let Some(segment) = update.segment {
+                self.stores
+                    .entry(update.workspace_id)
+                    .or_default()
+                    .set_segment(update.key, segment);
+                changed |= self.content_query.is_some();
+            }
         }
         if changed {
             self.refilter_keep();

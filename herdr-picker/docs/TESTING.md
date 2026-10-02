@@ -190,6 +190,7 @@ After pushing a `herdr-picker-v<version>` tag (see the release checklist in
 ```sh
 gh run watch "$(gh run list --limit 1 --json databaseId -q '.[0].databaseId')" --exit-status
 gh release view herdr-picker-v<version> --json assets -q '.assets[].name'   # 4 .tar.gz + 4 .sha256
+gh release view herdr-picker-v<version> --json body -q .body              # the CHANGELOG section
 
 herdr plugin uninstall warren.herdr-picker
 herdr plugin install wrn14897/herdr-plugins/herdr-picker --yes

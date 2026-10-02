@@ -52,7 +52,11 @@ plugin's own `AGENTS.md` before changing it.
 2. Regenerate the lockfile: `cargo build --release` then confirm
    `cargo build --release --locked` passes. A stale `Cargo.lock` fails every CI
    job, because the workflow builds with `--locked`.
-3. Add the version's entry to the plugin's `CHANGELOG.md`.
+3. Move the plugin's `CHANGELOG.md` `[Unreleased]` notes under a new
+   `## [<version>] - <date>` heading and add the compare/tag link at the
+   bottom. The workflow publishes that section as the release notes and fails
+   the release if it's missing (`scripts/changelog-section.sh <version>` shows
+   what it will publish).
 4. Commit `chore(<plugin>): release <version>`, push `main`, then push the tag
    `<plugin>-v<version>`.
 5. `gh run watch` until all targets pass, then check the release has a

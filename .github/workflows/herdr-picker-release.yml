@@ -28,6 +28,10 @@ jobs:
         run: |
           version="$(grep -m1 '^version' herdr-plugin.toml | sed -E 's/.*"([^"]+)".*/\1/')"
           test "herdr-picker-v${version}" = "${GITHUB_REF_NAME}"
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Release notes from CHANGELOG.md
+        run: bash scripts/changelog-section.sh "$VERSION" > release-notes.md
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -53,6 +57,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: herdr-picker/release-notes.md
           files: |
             herdr-picker/herdr-picker-${{ matrix.target }}.tar.gz
             herdr-picker/herdr-picker-${{ matrix.target }}.tar.gz.sha256

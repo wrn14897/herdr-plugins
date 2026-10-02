@@ -218,6 +218,8 @@ headless checks, driving the TUI, install-path tests, and release verification.
 
 - **Edit by reading first.** `cargo fmt` reflows code, so text you remember (or
   wrote earlier) often no longer matches. Read the current lines, then edit.
+- **Releases need a changelog entry.** The workflow publishes the
+  `CHANGELOG.md` section for the tagged version and fails without one.
 - **Version bumps change `Cargo.lock`.** Run `cargo build` after bumping, and
   confirm `cargo build --locked` passes before tagging; CI builds `--locked`.
 - **`herdr plugin link` never runs `[[build]]`.** A fresh checkout has no

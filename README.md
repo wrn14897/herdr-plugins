@@ -5,4 +5,4 @@ installable plugin.
 
 | Plugin | Description | Install |
 | --- | --- | --- |
-| [herdr-picker](herdr-picker/) | Fuzzy-search open workspaces with a live preview of the active pane | `herdr plugin install wrn14897/herdr-plugins/herdr-picker` |
+| [herdr-picker](herdr-picker/) | Search workspaces, screens, and agent conversations with a live preview | `herdr plugin install wrn14897/herdr-plugins/herdr-picker` |

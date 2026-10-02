@@ -1,9 +1,9 @@
 id = "warren.herdr-picker"
 name = "herdr picker"
-version = "0.1.0"
+version = "0.2.0"
 # Needs session.snapshot with layouts and popup plugin panes.
 min_herdr_version = "0.7.5"
-description = "Fast popup to fuzzy-search open workspaces with a live preview of the active pane"
+description = "Search workspaces, tabs, panes, screens, and agent conversations from a popup, with a live preview"
 platforms = ["macos", "linux"]
 
 # Downloads the prebuilt binary for this platform from the matching GitHub

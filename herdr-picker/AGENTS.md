@@ -88,8 +88,12 @@ Names and content use different matching on purpose.
   - Shell window titles (`user@host:~/dir`) are not fields (`is_shell_title`):
     they only repeat the cwd.
 - **Content** (screen lines, chat messages) uses literal/regex matching
-  (`content::Query`): 3+ non-space characters, every word in the same document,
-  smart case, `'phrase`, `/regex/`. Fuzzy matching over prose matches anything.
+  (`content::Query`): 3+ non-space characters (excluding `!words`), every word
+  in the same document, smart case, `'phrase`, `/regex/`, and `!word` to drop
+  documents. Fuzzy matching over prose matches anything.
+- `!word` works on both sides: nucleo drops the row by name, and
+  `Searcher::excluded_rows` stops `merge_content` from re-adding that row
+  through a text match.
 
 ### Ranking
 

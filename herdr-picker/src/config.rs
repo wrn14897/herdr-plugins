@@ -5,6 +5,7 @@
 //! enabled = true                       # false: search names and paths only
 //! screen_lines = 500                   # scrollback rows indexed per pane
 //! transcript_messages = 200            # newest chat messages kept per session
+//! transcript_bytes = 1048576           # max chat text kept per session
 //! agents = ["claude", "codex", "opencode"]
 //! ```
 

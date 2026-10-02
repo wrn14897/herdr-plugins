@@ -136,15 +136,20 @@ fn path_tail(path: &str) -> (usize, &str) {
 
 /// Attaches content matches to metadata hits, adds rows that only match by
 /// content, and re-ranks. `store_of` returns the content store for a row.
+/// Rows in `excluded` (see [`Searcher::excluded_rows`]) are never added.
 pub fn merge_content<'a>(
     hits: &mut Vec<Hit>,
     rows: &'a [Row],
     query: &content::Query,
+    excluded: &[bool],
     store_of: impl Fn(&'a Row) -> Option<&'a Store>,
 ) {
     let mut position: HashMap<usize, usize> =
         hits.iter().enumerate().map(|(i, h)| (h.row, i)).collect();
     for (i, row) in rows.iter().enumerate() {
+        if excluded.get(i).copied().unwrap_or(false) {
+            continue;
+        }
         let Some(store) = store_of(row).filter(|s| !s.is_empty()) else {
             continue;
         };
@@ -213,6 +218,21 @@ impl Searcher {
         // Stable sort keeps the natural (number) order among equal ranks.
         hits.sort_by_key(|h| (h.kind.tier(), std::cmp::Reverse(h.score)));
         hits
+    }
+
+    /// Rows whose names contain a `!word` of `query`. Text matches must not
+    /// bring these back.
+    pub fn excluded_rows(&mut self, query: &str, rows: &[Row]) -> Vec<bool> {
+        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let negatives: Vec<&Atom> = pattern.atoms.iter().filter(|a| a.negative).collect();
+        rows.iter()
+            .map(|row| {
+                let hay = Utf32Str::new(&row.haystack, &mut self.buf);
+                negatives
+                    .iter()
+                    .any(|a| a.score(hay, &mut self.matcher).is_none())
+            })
+            .collect()
     }
 
     fn match_row(&mut self, pattern: &Pattern, i: usize, row: &Row) -> Option<Hit> {
@@ -549,7 +569,10 @@ mod tests {
     #[test]
     fn negative_words_exclude_rows() {
         let rows = [row("api-server", "/a"), row("api-client", "/b")];
-        let hits = Searcher::new().search("api !client", &rows);
+        let mut s = Searcher::new();
+        let hits = s.search("api !client", &rows);
         assert_eq!(rows_of(&hits), [0]);
+        assert_eq!(s.excluded_rows("api !client", &rows), [false, true]);
+        assert_eq!(s.excluded_rows("api", &rows), [false, false]);
     }
 }

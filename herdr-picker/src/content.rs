@@ -146,14 +146,13 @@ const SNIPPET_LEAD: usize = 12;
 pub struct Query {
     /// The first pattern drives the scan; the rest must also match the document.
     patterns: Vec<Regex>,
+    /// `!word`s: documents containing any of these don't match.
+    excluded: Vec<Regex>,
 }
 
 impl Query {
     pub fn parse(raw: &str) -> Option<Self> {
         let raw = raw.trim();
-        if raw.chars().filter(|c| !c.is_whitespace()).count() < MIN_QUERY_CHARS {
-            return None;
-        }
         let case_insensitive = !raw.chars().any(char::is_uppercase);
         let build = |pattern: &str| {
             RegexBuilder::new(pattern)
@@ -163,19 +162,33 @@ impl Query {
                 .ok()
         };
 
-        let mut patterns = if let Some(re) = raw.strip_prefix('/').and_then(|r| r.strip_suffix('/'))
-        {
-            vec![build(re)?]
-        } else if let Some(phrase) = raw.strip_prefix('\'') {
-            vec![build(&regex::escape(phrase.trim()))?]
-        } else {
-            raw.split_whitespace()
-                .map(|w| build(&regex::escape(w)))
-                .collect::<Option<Vec<_>>>()?
-        };
+        let mut excluded = Vec::new();
+        let (mut patterns, positive) =
+            if let Some(re) = raw.strip_prefix('/').and_then(|r| r.strip_suffix('/')) {
+                (vec![build(re)?], re.to_owned())
+            } else if let Some(phrase) = raw.strip_prefix('\'') {
+                let phrase = phrase.trim();
+                (vec![build(&regex::escape(phrase))?], phrase.to_owned())
+            } else {
+                let mut words = Vec::new();
+                for word in raw.split_whitespace() {
+                    match word.strip_prefix('!') {
+                        Some(not) if !not.is_empty() => excluded.push(build(&regex::escape(not))?),
+                        _ => words.push(word),
+                    }
+                }
+                let patterns = words
+                    .iter()
+                    .map(|w| build(&regex::escape(w)))
+                    .collect::<Option<Vec<_>>>()?;
+                (patterns, words.concat())
+            };
+        if positive.chars().filter(|c| !c.is_whitespace()).count() < MIN_QUERY_CHARS {
+            return None;
+        }
         // Scan with the longest (usually most selective) term.
         patterns.sort_by_key(|p| std::cmp::Reverse(p.as_str().len()));
-        Some(Self { patterns })
+        Some(Self { patterns, excluded })
     }
 
     /// Matches in `store`, best first: chat before screen, newest first.
@@ -194,7 +207,9 @@ impl Query {
                 continue;
             }
             let body = &store.text[range.clone()];
-            if rest.iter().all(|p| p.is_match(body)) {
+            if rest.iter().all(|p| p.is_match(body))
+                && !self.excluded.iter().any(|p| p.is_match(body))
+            {
                 hits.push(ContentHit {
                     doc,
                     range: m.range(),
@@ -361,6 +376,23 @@ mod tests {
                 .unwrap()
                 .search(&store)
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn excluded_words_drop_documents() {
+        let store = store();
+        let hits = Query::parse("login !await").unwrap().search(&store);
+        // The assistant message mentions "await", so only the other two remain.
+        assert_eq!(hits.len(), 2);
+        assert!(
+            hits.iter()
+                .all(|h| !store.doc_text(h.doc).contains("await"))
+        );
+        assert!(Query::parse("!login").is_none(), "needs a positive word");
+        assert!(
+            Query::parse("ab !login").is_none(),
+            "positive part is too short"
         );
     }
 

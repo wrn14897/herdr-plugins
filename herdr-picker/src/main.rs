@@ -1,4 +1,4 @@
-//! herdr-picker: fuzzy-search open herdr workspaces with a live preview.
+//! herdr-picker: search herdr workspaces, screens, and agent conversations.
 
 mod app;
 #[cfg(test)]
@@ -25,7 +25,7 @@ use crate::config::Config;
 use crate::herdr::Client;
 
 const USAGE: &str = "\
-herdr-picker - fuzzy-search herdr workspaces with a live preview
+herdr-picker - search herdr workspaces, screens, and agent conversations
 
 USAGE:
     herdr-picker          open the interactive picker
@@ -35,8 +35,15 @@ USAGE:
                           (id, kind, score, label, content hits, detail)
     herdr-picker --help   show this message
 
+QUERIES:
+    names (labels, tabs, panes, agents, path, branch) match fuzzily, per word.
+    Screens and conversations match literally (3+ chars, all words in one line
+    or message); 'exact phrase and /regex/ are supported. !word excludes in
+    both. Lowercase ignores case; any uppercase letter makes it case-sensitive.
+
 KEYS:
     type to search · up/down, ctrl-p/n, ctrl-k/j move · enter focus
+    alt-j/k next/prev text match · ctrl-s match/live screen
     esc clears the query, then closes · ctrl-r refresh · ctrl-u clear · ctrl-w delete word";
 
 fn main() -> ExitCode {
@@ -114,9 +121,11 @@ fn search(query: &str) -> Result<()> {
         }
     }
 
-    let mut hits = search::Searcher::new().search(query, &rows);
+    let mut searcher = search::Searcher::new();
+    let mut hits = searcher.search(query, &rows);
     if let Some(content_query) = content::Query::parse(query) {
-        search::merge_content(&mut hits, &rows, &content_query, |row| {
+        let excluded = searcher.excluded_rows(query, &rows);
+        search::merge_content(&mut hits, &rows, &content_query, &excluded, |row| {
             stores.get(&row.workspace_id)
         });
     }

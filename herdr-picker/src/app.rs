@@ -200,8 +200,9 @@ impl App {
 
         self.hits = self.searcher.search(&self.query, &self.rows);
         if let Some(query) = &self.content_query {
+            let excluded = self.searcher.excluded_rows(&self.query, &self.rows);
             let stores = &self.stores;
-            search::merge_content(&mut self.hits, &self.rows, query, |row| {
+            search::merge_content(&mut self.hits, &self.rows, query, &excluded, |row| {
                 stores.get(&row.workspace_id)
             });
         }

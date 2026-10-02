@@ -46,8 +46,17 @@ pub struct Task {
 /// Last indexed version of each transcript, so unchanged sessions are skipped.
 pub type Versions = Arc<Mutex<HashMap<String, (Location, u64)>>>;
 
+/// The pane this process runs in, if any. Its scrollback contains whatever is
+/// typed into the picker, so indexing it would match every query. (Popups are
+/// not panes and have no id, so the normal popup picker excludes nothing.)
+pub fn own_pane() -> Option<String> {
+    std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
+}
+
 /// All indexing tasks for one workspace under `config`.
-pub fn tasks_for(row: &Row, config: &Config) -> Vec<Task> {
+pub fn tasks_for(row: &Row, config: &Config, own_pane: Option<&str>) -> Vec<Task> {
     if !config.content.enabled {
         return Vec::new();
     }
@@ -57,11 +66,13 @@ pub fn tasks_for(row: &Row, config: &Config) -> Vec<Task> {
             workspace_id: row.workspace_id.clone(),
             job,
         };
-        tasks.push(task(Job::Screen {
-            pane_id: pane.pane_id.clone(),
-            pane: pane.short_name(),
-            lines: config.content.screen_lines,
-        }));
+        if own_pane != Some(pane.pane_id.as_str()) {
+            tasks.push(task(Job::Screen {
+                pane_id: pane.pane_id.clone(),
+                pane: pane.short_name(),
+                lines: config.content.screen_lines,
+            }));
+        }
         if let Some(request) = transcript_request(pane, row, config) {
             tasks.push(task(Job::Transcript {
                 pane_id: pane.pane_id.clone(),

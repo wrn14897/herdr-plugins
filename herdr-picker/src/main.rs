@@ -31,7 +31,8 @@ USAGE:
     herdr-picker          open the interactive picker
     herdr-picker --list   print workspaces as TSV (id, number, label, status, cwd, active pane)
     herdr-picker --search QUERY
-                          index everything, then print ranked matches (no UI)
+                          index everything, then print ranked matches as TSV
+                          (id, kind, score, label, content hits, detail)
     herdr-picker --help   show this message
 
 KEYS:
@@ -99,7 +100,11 @@ fn search(query: &str) -> Result<()> {
     let rows = model::build_rows(&client.snapshot()?);
     let versions = index::Versions::default();
     let mut stores: HashMap<String, content::Store> = HashMap::new();
-    for task in rows.iter().flat_map(|row| index::tasks_for(row, &config)) {
+    let own_pane = index::own_pane();
+    for task in rows
+        .iter()
+        .flat_map(|row| index::tasks_for(row, &config, own_pane.as_deref()))
+    {
         let update = index::run(&client, &versions, &task);
         if let Some(segment) = update.segment {
             stores
@@ -121,9 +126,10 @@ fn search(query: &str) -> Result<()> {
             format!("\t{}: {}", d.badge.unwrap_or_default(), d.text)
         });
         println!(
-            "{}\t{}\t{}\t{} content hits{detail}",
+            "{}\t{}\t{}\t{}\t{} content hits{detail}",
             row.workspace_id,
             hit.kind.badge(),
+            hit.score,
             row.label,
             hit.content.len()
         );

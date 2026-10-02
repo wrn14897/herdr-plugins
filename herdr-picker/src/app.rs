@@ -42,6 +42,7 @@ pub enum View {
 pub struct App {
     client: Client,
     config: Config,
+    own_pane: Option<String>,
     versions: Versions,
     pub rows: Vec<Row>,
     pub hits: Vec<Hit>,
@@ -80,6 +81,7 @@ impl App {
         let mut app = Self {
             client,
             config,
+            own_pane: index::own_pane(),
             versions: Versions::default(),
             rows: Vec::new(),
             hits: Vec::new(),
@@ -163,7 +165,7 @@ impl App {
     }
 
     fn queue_row_index(&mut self, row: usize, urgent: bool) {
-        for task in index::tasks_for(&self.rows[row], &self.config) {
+        for task in index::tasks_for(&self.rows[row], &self.config, self.own_pane.as_deref()) {
             self.index_pending += 1;
             self.index_total += 1;
             index::queue(

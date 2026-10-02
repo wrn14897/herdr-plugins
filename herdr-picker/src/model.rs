@@ -67,6 +67,8 @@ pub struct PaneInfo {
     pub agent: Option<String>,
     #[serde(default)]
     pub agent_status: String,
+    #[serde(default)]
+    pub terminal_title_stripped: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -89,8 +91,25 @@ pub struct Row {
     pub linked_worktree: bool,
     pub active_pane_id: Option<String>,
     pub tabs: Vec<TabRow>,
+    pub branch: Option<String>,
+    /// Secondary searchable names: tabs, panes, agents, terminal titles.
+    pub fields: Vec<Field>,
     /// Precomputed metadata search text; see [`Row::refresh_haystack`].
     pub haystack: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    Tab,
+    Pane,
+    Agent,
+    Title,
+}
+
+#[derive(Debug, Clone)]
+pub struct Field {
+    pub kind: FieldKind,
+    pub text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -202,9 +221,12 @@ pub fn build_rows(snapshot: &Snapshot) -> Vec<Row> {
                 linked_worktree: ws.worktree.as_ref().is_some_and(|w| w.is_linked_worktree),
                 active_pane_id: active_pane.map(|p| p.pane_id.clone()),
                 tabs: tab_rows,
+                branch: None,
+                fields: Vec::new(),
                 haystack: String::new(),
             };
-            row.refresh_haystack(None);
+            row.fields = collect_fields(&row.label, &tabs, |tab| tab_panes(tab));
+            row.refresh_haystack();
             row
         })
         .collect();
@@ -213,17 +235,70 @@ pub fn build_rows(snapshot: &Snapshot) -> Vec<Row> {
     rows
 }
 
+/// Distinct, meaningful names inside a workspace. Shell window titles such as
+/// `user@host:~/dir` only repeat the cwd, so they are skipped.
+fn collect_fields<'a>(
+    label: &str,
+    tabs: &[&TabInfo],
+    tab_panes: impl Fn(&str) -> &'a [&'a PaneInfo],
+) -> Vec<Field> {
+    let mut fields: Vec<Field> = Vec::new();
+    let mut push = |kind, text: &str| {
+        let text = text.trim();
+        if !text.is_empty() && text != label && !fields.iter().any(|f| f.text == text) {
+            fields.push(Field {
+                kind,
+                text: text.to_owned(),
+            });
+        }
+    };
+    for tab in tabs {
+        push(FieldKind::Tab, &tab.label);
+        for pane in tab_panes(&tab.tab_id) {
+            if let Some(agent) = &pane.agent {
+                push(FieldKind::Agent, agent);
+            }
+            if let Some(pane_label) = &pane.label {
+                push(FieldKind::Pane, pane_label);
+            }
+            if let Some(title) = &pane.terminal_title_stripped
+                && !is_shell_title(title)
+            {
+                push(FieldKind::Title, title);
+            }
+        }
+    }
+    fields
+}
+
+fn is_shell_title(title: &str) -> bool {
+    title
+        .split_once(':')
+        .is_some_and(|(user_host, _)| user_host.contains('@') && !user_host.contains(' '))
+}
+
 impl Row {
+    pub fn set_branch(&mut self, branch: Option<&str>) {
+        self.branch = branch.map(str::to_owned);
+        self.refresh_haystack();
+    }
+
     /// Rebuilds the cached fuzzy-search text. The label and displayed cwd come
     /// first so match positions map straight back onto the rendered row.
-    pub fn refresh_haystack(&mut self, branch: Option<&str>) {
-        let repo = self.repo_name.as_deref().unwrap_or("");
-        self.haystack = format!(
-            "{} {} {repo} {}",
-            self.label,
-            self.cwd_display,
-            branch.unwrap_or("")
-        );
+    pub fn refresh_haystack(&mut self) {
+        let mut hay = format!("{} {}", self.label, self.cwd_display);
+        for extra in [self.repo_name.as_deref(), self.branch.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            hay.push(' ');
+            hay.push_str(extra);
+        }
+        for field in &self.fields {
+            hay.push(' ');
+            hay.push_str(&field.text);
+        }
+        self.haystack = hay;
     }
 }
 
@@ -299,6 +374,39 @@ mod tests {
         assert_eq!(tabs[1].panes.len(), 2);
         assert_eq!(tabs[1].panes[0].agent.as_deref(), Some("claude"));
         assert!(tabs[1].panes[1].focused);
+    }
+
+    #[test]
+    fn collects_distinct_fields_and_skips_shell_titles() {
+        let snapshot: Snapshot = serde_json::from_str(
+            r#"{
+              "workspaces":[{"workspace_id":"w1","label":"api","number":1,"active_tab_id":"w1:t1"}],
+              "tabs":[{"tab_id":"w1:t1","workspace_id":"w1","label":"api","number":1},
+                      {"tab_id":"w1:t2","workspace_id":"w1","label":"logs","number":2}],
+              "panes":[
+                {"pane_id":"w1:p1","tab_id":"w1:t1","label":"opencode","agent":"opencode",
+                 "terminal_title_stripped":"OC | fix login bug"},
+                {"pane_id":"w1:p2","tab_id":"w1:t2","label":"logs",
+                 "terminal_title_stripped":"u@host:~/api"}
+              ]
+            }"#,
+        )
+        .unwrap();
+        let row = &build_rows(&snapshot)[0];
+        let fields: Vec<_> = row
+            .fields
+            .iter()
+            .map(|f| (f.kind, f.text.as_str()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                (FieldKind::Agent, "opencode"),
+                (FieldKind::Title, "OC | fix login bug"),
+                (FieldKind::Tab, "logs"),
+            ]
+        );
+        assert!(row.haystack.contains("fix login bug"));
     }
 
     #[test]

@@ -93,8 +93,8 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, inner, &mut state);
 }
 
-fn hit_height(_hit: &Hit) -> usize {
-    1
+fn hit_height(hit: &Hit) -> usize {
+    1 + usize::from(hit.detail.is_some())
 }
 
 fn hit_lines(app: &App, hit: &Hit) -> Vec<Line<'static>> {
@@ -110,7 +110,20 @@ fn hit_lines(app: &App, hit: &Hit) -> Vec<Line<'static>> {
     }
     spans.push(Span::raw("  "));
     spans.extend(highlighted(&row.cwd_display, &hit.cwd, DIM));
-    vec![Line::from(spans)]
+    let mut lines = vec![Line::from(spans)];
+
+    if let Some(detail) = &hit.detail {
+        let mut spans = vec![
+            Span::styled("     ↳ ", DIM),
+            Span::styled(
+                format!("{} ", hit.kind.badge()),
+                Style::new().fg(Color::Blue),
+            ),
+        ];
+        spans.extend(highlighted(&detail.text, &detail.indices, Style::new()));
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 /// First visible item index so `selected` stays on screen, scrolling as little

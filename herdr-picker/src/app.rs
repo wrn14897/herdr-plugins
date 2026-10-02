@@ -98,7 +98,7 @@ impl App {
         let mut queued = HashSet::new();
         for row in &mut self.rows {
             match self.git.get(&row.cwd) {
-                Some(info) => row.refresh_haystack(info.as_ref().map(|g| g.branch.as_str())),
+                Some(info) => row.set_branch(info.as_ref().map(|g| g.branch.as_str())),
                 None if !row.cwd.is_empty() && queued.insert(row.cwd.clone()) => {
                     git::queue_lookup(&self.pool, row.cwd.clone(), self.git_tx.clone());
                 }
@@ -146,7 +146,7 @@ impl App {
         while let Ok((dir, info)) = self.git_rx.try_recv() {
             let branch = info.as_ref().map(|g| g.branch.as_str());
             for row in self.rows.iter_mut().filter(|r| r.cwd == dir) {
-                row.refresh_haystack(branch);
+                row.set_branch(branch);
             }
             self.git.insert(dir, info);
             git_changed = true;

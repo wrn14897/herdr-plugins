@@ -30,7 +30,14 @@ match in context.
 | Agent conversation history (Claude Code, Codex, OpenCode) | text | 4th |
 | Pane scrollback (last 500 rows of agent panes and the active pane) | text | 5th |
 
-Fuzzy matching is fzf-style ([nucleo](https://github.com/helix-editor/nucleo)).
+Fuzzy matching is fzf-style ([nucleo](https://github.com/helix-editor/nucleo)),
+but stricter: each word must match inside one name (not scattered across
+several), and only well-formed matches count, such as substrings, prefixes, and
+initials (`wrcb` → `warren-revisit-claude-bot`). Paths match on their last two
+segments. So a typo or nonsense query shows nothing rather than noise.
+Separate words can match different names: `api main` finds workspace `api` on
+branch `main`. `!word` excludes rows.
+
 Content matching starts at 3 characters and finds lines (or messages) that
 contain every word, in any order. Lowercase queries ignore case; any uppercase
 letter makes the query case-sensitive. `'exact phrase` matches literally and
@@ -60,7 +67,10 @@ command = "warren.herdr-picker.open"
 description = "open herdr picker"
 ```
 
-Then run `herdr server reload-config`. You can also open it without a binding:
+Then run `herdr server reload-config` and check it appears in `prefix+?`. Use a
+`prefix+` key: bare chords like `ctrl+f` are passed to the focused program
+(shells and editors use them), so herdr may never see them. You can also open
+it without a binding:
 
 ```sh
 herdr plugin action invoke warren.herdr-picker.open
@@ -123,16 +133,23 @@ sent anywhere. Set `enabled = false` or trim `agents` to opt out.
 ## Development
 
 ```sh
-cargo test
-HERDR_PICKER_FROM_SOURCE=1 bash herdr/install.sh   # build into bin/
 herdr plugin link .
+bash herdr/install.sh                              # required once: link skips build steps
+HERDR_PICKER_FROM_SOURCE=1 bash herdr/install.sh   # rebuild after code changes
+cargo test
 ```
 
-`herdr plugin link` does not run build steps, so rerun `herdr/install.sh` after
-code changes. Two commands help outside the popup:
+`herdr plugin link` registers the plugin but does not run its build step, so
+`bin/herdr-picker` must be created by `herdr/install.sh`. It downloads the
+release binary when one exists for the manifest version, otherwise builds with
+cargo. Building needs Rust 1.85 or newer (`rustup update stable`). If the binary
+is missing, the open action shows a toast saying so.
+
+Two commands help outside the popup:
 
 - `herdr-picker --list` prints the workspace rows as TSV.
-- `herdr-picker --search QUERY` indexes everything and prints ranked results.
+- `herdr-picker --search QUERY` indexes everything and prints ranked results
+  with their scores.
 
 ## Releasing
 

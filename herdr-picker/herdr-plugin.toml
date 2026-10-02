@@ -1,6 +1,6 @@
 id = "warren.herdr-picker"
 name = "herdr picker"
-version = "0.2.0"
+version = "0.2.1"
 # Needs session.snapshot with layouts and popup plugin panes.
 min_herdr_version = "0.7.5"
 description = "Search workspaces, tabs, panes, screens, and agent conversations from a popup, with a live preview"

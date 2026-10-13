@@ -348,18 +348,37 @@ mod opencode {
         find_in(&database(), req)
     }
 
+    // OpenCode v2 moved sessions to `session_v2` and messages to
+    // `session_message`, migrating v1 rows; v1 tables stop receiving writes.
+    fn is_v2(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_message'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .ok()
+        .flatten()
+        .is_some()
+    }
+
     pub(super) fn find_in(db: &Path, req: &Request) -> Option<(Location, u64)> {
         if !db.is_file() {
             return None;
         }
         let conn = open(db)?;
+        let table = if is_v2(&conn) {
+            "session_v2"
+        } else {
+            "session"
+        };
         let by_id = req
             .session
             .as_ref()
             .filter(|s| s.kind == "id" && !s.value.is_empty())
             .and_then(|s| {
                 conn.query_row(
-                    "SELECT id, time_updated FROM session WHERE id = ?1",
+                    &format!("SELECT id, time_updated FROM {table} WHERE id = ?1"),
                     [&s.value],
                     |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
                 )
@@ -371,9 +390,11 @@ mod opencode {
             Some(found) => found,
             None => conn
                 .query_row(
-                    "SELECT id, time_updated FROM session
-                     WHERE directory = ?1 AND parent_id IS NULL AND time_archived IS NULL
-                     ORDER BY time_updated DESC LIMIT 1",
+                    &format!(
+                        "SELECT id, time_updated FROM {table}
+                         WHERE directory = ?1 AND parent_id IS NULL AND time_archived IS NULL
+                         ORDER BY time_updated DESC LIMIT 1"
+                    ),
                     [&req.cwd],
                     |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
                 )
@@ -394,6 +415,9 @@ mod opencode {
         let Some(conn) = open(db) else {
             return Vec::new();
         };
+        if is_v2(&conn) {
+            return read_v2(&conn, session, limits);
+        }
         // Text parts are a minority among tool/step parts, so over-fetch.
         let fetch = i64::try_from(limits.messages.saturating_mul(8)).unwrap_or(i64::MAX);
         let Ok(mut stmt) = conn.prepare(
@@ -431,6 +455,50 @@ mod opencode {
         };
         let text = part.get("text")?.as_str()?.trim();
         (!text.is_empty()).then(|| (role, text.to_owned()))
+    }
+
+    fn read_v2(conn: &Connection, session: &str, limits: Limits) -> Vec<(Role, String)> {
+        // Many assistant messages hold only tool calls, so over-fetch.
+        let fetch = i64::try_from(limits.messages.saturating_mul(4)).unwrap_or(i64::MAX);
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT type, data FROM session_message
+             WHERE session_id = ?1 AND type IN ('user', 'assistant')
+             ORDER BY seq DESC LIMIT ?2",
+        ) else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map(rusqlite::params![session, fetch], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        }) else {
+            return Vec::new();
+        };
+        let mut messages: Vec<(Role, String)> = rows
+            .filter_map(Result::ok)
+            .filter_map(|(kind, data)| parse_v2(&kind, &data))
+            .collect();
+        messages.reverse();
+        messages
+    }
+
+    fn parse_v2(kind: &str, data: &str) -> Option<(Role, String)> {
+        let data: Value = serde_json::from_str(data).ok()?;
+        let (role, text) = match kind {
+            "user" => (Role::User, data.get("text")?.as_str()?.trim().to_owned()),
+            "assistant" => {
+                let parts: Vec<&str> = data
+                    .get("content")?
+                    .as_array()?
+                    .iter()
+                    .filter(|c| c.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|c| c.get("text")?.as_str())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                (Role::Assistant, parts.join("\n\n"))
+            }
+            _ => return None,
+        };
+        (!text.is_empty()).then_some((role, text))
     }
 }
 
@@ -612,6 +680,63 @@ mod tests {
                 db: db.clone(),
                 session: "old".into()
             }
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn opencode_v2_reads_session_messages() {
+        let dir = temp_dir("opencode-v2");
+        let db = dir.join("opencode.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL,
+                time_updated INTEGER NOT NULL, time_archived INTEGER);
+            CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL,
+                time_updated INTEGER NOT NULL, time_archived INTEGER);
+            CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT,
+                seq INTEGER, data TEXT);
+            INSERT INTO session VALUES ('old', NULL, '/proj', 1, NULL);
+            INSERT INTO session_v2 VALUES ('old', NULL, '/proj', 1, NULL), ('new', NULL, '/proj', 5, NULL);
+            INSERT INTO session_message VALUES
+                ('m1', 'new', 'user', 1, '{"text":"add retries"}'),
+                ('m2', 'new', 'synthetic', 2, '{"text":"tools changed"}'),
+                ('m3', 'new', 'assistant', 3, '{"content":[{"type":"reasoning","text":"hmm"},{"type":"tool","tool":"shell"}]}'),
+                ('m4', 'new', 'assistant', 4, '{"content":[{"type":"text","text":"Added backoff."},{"type":"text","text":"Done."}]}'),
+                ('m5', 'new', 'idle', 5, '{"outcome":"succeeded"}');
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let req = Request {
+            agent: "opencode".into(),
+            cwd: "/proj".into(),
+            session: None,
+        };
+        let (location, version) = opencode::find_in(&db, &req).unwrap();
+        assert_eq!(
+            location,
+            Location::OpenCode {
+                db: db.clone(),
+                session: "new".into()
+            }
+        );
+        assert_eq!(version, 5);
+        let messages = read(
+            &location,
+            Limits {
+                messages: 50,
+                bytes: 1 << 20,
+            },
+        );
+        assert_eq!(
+            texts(&messages),
+            [
+                (Role::User, "add retries"),
+                (Role::Assistant, "Added backoff.\n\nDone.")
+            ]
         );
         let _ = std::fs::remove_dir_all(dir);
     }

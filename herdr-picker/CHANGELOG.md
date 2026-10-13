@@ -10,6 +10,11 @@ section for that version as the release notes.
 
 ### Fixed
 
+- OpenCode v2 conversations are searchable again. OpenCode v2 moved sessions
+  to new `session_v2` and `session_message` tables and stopped writing the old
+  ones, so the picker showed stale history and missed new sessions. It now
+  reads the v2 tables when present and falls back to the v1 tables otherwise.
+
 - `!word` now excludes in text search too: messages and screen lines
   containing `word` don't match, and a workspace excluded by name is not
   brought back by a text match. Previously `!word` was searched for literally.

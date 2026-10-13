@@ -8,13 +8,14 @@ section for that version as the release notes.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-12
+
 ### Fixed
 
 - OpenCode v2 conversations are searchable again. OpenCode v2 moved sessions
   to new `session_v2` and `session_message` tables and stopped writing the old
   ones, so the picker showed stale history and missed new sessions. It now
   reads the v2 tables when present and falls back to the v1 tables otherwise.
-
 - `!word` now excludes in text search too: messages and screen lines
   containing `word` don't match, and a workspace excluded by name is not
   brought back by a text match. Previously `!word` was searched for literally.
@@ -97,7 +98,8 @@ section for that version as the release notes.
 - Prebuilt binaries for macOS and Linux, downloaded and sha256-verified at
   install, with a cargo fallback.
 
-[Unreleased]: https://github.com/wrn14897/herdr-plugins/compare/herdr-picker-v0.2.1...HEAD
+[Unreleased]: https://github.com/wrn14897/herdr-plugins/compare/herdr-picker-v0.2.2...HEAD
+[0.2.2]: https://github.com/wrn14897/herdr-plugins/compare/herdr-picker-v0.2.1...herdr-picker-v0.2.2
 [0.2.1]: https://github.com/wrn14897/herdr-plugins/releases/tag/herdr-picker-v0.2.1
 [0.2.0]: https://github.com/wrn14897/herdr-plugins/releases/tag/herdr-picker-v0.2.0
 [0.1.0]: https://github.com/wrn14897/herdr-plugins/releases/tag/herdr-picker-v0.1.0
